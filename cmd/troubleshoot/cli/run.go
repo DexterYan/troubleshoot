@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -35,6 +36,16 @@ import (
 )
 
 func runTroubleshoot(v *viper.Viper, arg []string) error {
+
+    if v.GetString("cpuprofile") != "" {
+        f, err := os.Create(v.GetString("cpuprofile"))
+        if err != nil {
+            return errors.Wrap(err, "Failed to create CPU profile file")
+        }
+        pprof.StartCPUProfile(f)
+        defer pprof.StopCPUProfile()
+    }
+
 	if v.GetBool("load-cluster-specs") == false && len(arg) < 1 {
 		return errors.New("flag load-cluster-specs must be set if no specs are provided on the command line")
 	}
