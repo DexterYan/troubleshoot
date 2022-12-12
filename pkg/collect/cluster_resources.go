@@ -199,6 +199,7 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 		}
 	})
 
+	// these collect functions all have the exact same args and structure to run them
 	apiQueries := []apiQuery{
 		{getPodDisruptionBudgets, "pod-disruption-budgets"},
 		{services, "services"},
@@ -218,6 +219,7 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 		{roleBindings, "rolebindings"},
 	}
 
+	// add the above collect functions to the queue
 	for _, thisQuery := range apiQueries {
 		clusterResourceCollectors = append(clusterResourceCollectors, func() {
 			queryOutput, errors := thisQuery.queryFunction(ctx, client, namespaceNames)
@@ -288,11 +290,17 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 	})
 
 	// run the collectors
-	wg.Add(len(clusterResourceCollectors))
+
+	maxNbConcurrentGoroutines := 5
+	concurrentGoroutines := make(chan struct{}, maxNbConcurrentGoroutines)
+
 	for _, thisClusterResourceCollector := range clusterResourceCollectors {
+		wg.Add(1)
 		go func(crCollector getClusterResource) {
 			defer wg.Done()
+			concurrentGoroutines <- struct{}{}
 			crCollector()
+			<-concurrentGoroutines
 		}(thisClusterResourceCollector)
 	}
 	wg.Wait()
