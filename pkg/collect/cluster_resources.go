@@ -51,10 +51,6 @@ type apiQuery struct {
 
 type getClusterResource func()
 
-type clusterResourceCollectors struct {
-	clusterResourceCollectorFunction getClusterResource
-}
-
 func (c *CollectClusterResources) Title() string {
 	return getCollectorName(c)
 }
@@ -170,11 +166,10 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 		}
 		namespaceNames = filteredNamespaces
 	}
+	var clusterResourceCollectors []getClusterResource
 
 	// pods
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		pods, podErrors, unhealthyPods := pods(ctx, client, namespaceNames)
 		for k, v := range pods {
 			output.SaveResult(c.BundlePath, path.Join("cluster-resources/pods", k), bytes.NewBuffer(v))
@@ -183,6 +178,7 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 
 		for _, pod := range unhealthyPods {
 			allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+			// get the logs from pods, one at a time. Takes a long time if there's a long list.
 			for _, container := range allContainers {
 				logsRoot := ""
 				if c.BundlePath != "" {
@@ -201,7 +197,7 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 				}
 			}
 		}
-	}()
+	})
 
 	apiQueries := []apiQuery{
 		{getPodDisruptionBudgets, "pod-disruption-budgets"},
@@ -222,89 +218,83 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 		{roleBindings, "rolebindings"},
 	}
 
-	wg.Add(len(apiQueries))
 	for _, thisQuery := range apiQueries {
-		go func(q apiQuery) {
-			defer wg.Done()
-			queryOutput, errors := q.queryFunction(ctx, client, namespaceNames)
+		clusterResourceCollectors = append(clusterResourceCollectors, func() {
+			queryOutput, errors := thisQuery.queryFunction(ctx, client, namespaceNames)
 			for k, v := range queryOutput {
-				output.SaveResult(c.BundlePath, path.Join("cluster-resources", q.saveLocation, k), bytes.NewBuffer(v))
+				output.SaveResult(c.BundlePath, path.Join("cluster-resources", thisQuery.saveLocation, k), bytes.NewBuffer(v))
 			}
-			output.SaveResult(c.BundlePath, "cluster-resources/"+q.saveLocation+".json", marshalErrors(errors))
-		}(thisQuery)
+			output.SaveResult(c.BundlePath, "cluster-resources/"+thisQuery.saveLocation+".json", marshalErrors(errors))
+		})
 	}
 
-
-
-
 	// storage classes
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		storageClasses, storageErrors := storageClasses(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/storage-classes.json", bytes.NewBuffer(storageClasses))
 		output.SaveResult(c.BundlePath, "cluster-resources/storage-errors.json", marshalErrors(storageErrors))
-	}()
+	})
 
 	// crds
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		customResourceDefinitions, crdErrors := crds(ctx, client, c.ClientConfig)
 		output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions.json", bytes.NewBuffer(customResourceDefinitions))
 		output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions-errors.json", marshalErrors(crdErrors))
-	}()
+	})
 
 	// crs
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		customResources, crErrors := crs(ctx, dynamicClient, client, c.ClientConfig, namespaceNames)
 		for k, v := range customResources {
 			output.SaveResult(c.BundlePath, fmt.Sprintf("cluster-resources/custom-resources/%v", k), bytes.NewBuffer(v))
 		}
 		output.SaveResult(c.BundlePath, "cluster-resources/custom-resources/custom-resources-errors.json", marshalErrors(crErrors))
-	}()
+	})
 
 	// nodes
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		nodes, nodeErrors := nodes(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/nodes.json", bytes.NewBuffer(nodes))
 		output.SaveResult(c.BundlePath, "cluster-resources/nodes-errors.json", marshalErrors(nodeErrors))
-	}()
+	})
 
 	// apiResources
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		groups, resources, groupsResourcesErrors := apiResources(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/groups.json", bytes.NewBuffer(groups))
 		output.SaveResult(c.BundlePath, "cluster-resources/resources.json", bytes.NewBuffer(resources))
 		output.SaveResult(c.BundlePath, "cluster-resources/groups-resources-errors.json", marshalErrors(groupsResourcesErrors))
-	}()
+	})
 
 	//Persistent Volumes
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		pvs, pvsErrors := pvs(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/pvs.json", bytes.NewBuffer(pvs))
 		output.SaveResult(c.BundlePath, "cluster-resources/pvs-errors.json", marshalErrors(pvsErrors))
-	}()
+	})
 
 	//Cluster Roles
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		clusterRoles, clusterRolesErrors := clusterRoles(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/clusterroles.json", bytes.NewBuffer(clusterRoles))
 		output.SaveResult(c.BundlePath, "cluster-resources/clusterroles-errors.json", marshalErrors(clusterRolesErrors))
-	}()
+	})
 
 	//Cluster Role Bindings
-	wg.Add(1)
-	go func() {
+	clusterResourceCollectors = append(clusterResourceCollectors, func() {
 		clusterRoleBindings, clusterRoleBindingsErrors := clusterRoleBindings(ctx, client)
 		output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings.json", bytes.NewBuffer(clusterRoleBindings))
 		output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings-errors.json", marshalErrors(clusterRoleBindingsErrors))
-	}()
+	})
 
+	// run the collectors
+	wg.Add(len(clusterResourceCollectors))
+	for _, thisClusterResourceCollector := range clusterResourceCollectors {
+		go func(crCollector getClusterResource) {
+			defer wg.Done()
+			crCollector()
+		}(thisClusterResourceCollector)
+	}
 	wg.Wait()
 	return output, nil
 }
