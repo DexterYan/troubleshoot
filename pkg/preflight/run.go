@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -30,7 +31,18 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
-func RunPreflights(interactive bool, output, format, arg string) error {
+func RunPreflights(interactive bool, output, format, arg string, cpuprofile string) error {
+	
+	// CPU profile instrumentation
+	if cpuprofile != "" {
+        f, err := os.Create(cpuprofile)
+        if err != nil {
+            return errors.Wrap(err, "Failed to create CPU profile file")
+        }
+        pprof.StartCPUProfile(f)
+        defer pprof.StopCPUProfile()
+    }
+
 	if interactive {
 		fmt.Print(cursor.Hide())
 		defer fmt.Print(cursor.Show())

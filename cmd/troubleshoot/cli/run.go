@@ -37,6 +37,7 @@ import (
 
 func runTroubleshoot(v *viper.Viper, arg []string) error {
 
+	// CPU Profile instrumentation
     if v.GetString("cpuprofile") != "" {
         f, err := os.Create(v.GetString("cpuprofile"))
         if err != nil {
