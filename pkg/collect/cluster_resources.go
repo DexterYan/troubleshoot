@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	troubleshootv1beta2 "github.com/replicatedhq/troubleshoot/pkg/apis/troubleshoot/v1beta2"
 	"github.com/replicatedhq/troubleshoot/pkg/k8sutil"
@@ -49,7 +50,10 @@ type apiQuery struct {
 	saveLocation  string
 }
 
-type getClusterResource func()
+type getClusterResource struct {
+	Name string
+	Run  func()
+}
 
 func (c *CollectClusterResources) Title() string {
 	return getCollectorName(c)
@@ -169,34 +173,37 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 	var clusterResourceCollectors []getClusterResource
 
 	// pods
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		pods, podErrors, unhealthyPods := pods(ctx, client, namespaceNames)
-		for k, v := range pods {
-			output.SaveResult(c.BundlePath, path.Join("cluster-resources/pods", k), bytes.NewBuffer(v))
-		}
-		output.SaveResult(c.BundlePath, "cluster-resources/pods-errors.json", marshalErrors(podErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "pods",
+		Run: func() {
+			pods, podErrors, unhealthyPods := pods(ctx, client, namespaceNames)
+			for k, v := range pods {
+				output.SaveResult(c.BundlePath, path.Join("cluster-resources/pods", k), bytes.NewBuffer(v))
+			}
+			output.SaveResult(c.BundlePath, "cluster-resources/pods-errors.json", marshalErrors(podErrors))
 
-		for _, pod := range unhealthyPods {
-			allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
-			// get the logs from pods, one at a time. Takes a long time if there's a long list.
-			for _, container := range allContainers {
-				logsRoot := ""
-				if c.BundlePath != "" {
-					logsRoot = path.Join(c.BundlePath, "cluster-resources", "pods", "logs", pod.Namespace)
-				}
-				limits := &troubleshootv1beta2.LogLimits{
-					MaxLines: 500,
-				}
-				podLogs, err := savePodLogs(ctx, logsRoot, client, &pod, "", container.Name, limits, false)
-				if err != nil {
-					errPath := filepath.Join("cluster-resources", "pods", "logs", pod.Namespace, pod.Name, fmt.Sprintf("%s-logs-errors.log", container.Name))
-					output.SaveResult(c.BundlePath, errPath, bytes.NewBuffer([]byte(err.Error())))
-				}
-				for k, v := range podLogs {
-					output[filepath.Join("cluster-resources", "pods", "logs", pod.Namespace, k)] = v
+			for _, pod := range unhealthyPods {
+				allContainers := append(pod.Spec.InitContainers, pod.Spec.Containers...)
+				// get the logs from pods, one at a time. Takes a long time if there's a long list.
+				for _, container := range allContainers {
+					logsRoot := ""
+					if c.BundlePath != "" {
+						logsRoot = path.Join(c.BundlePath, "cluster-resources", "pods", "logs", pod.Namespace)
+					}
+					limits := &troubleshootv1beta2.LogLimits{
+						MaxLines: 500,
+					}
+					podLogs, err := savePodLogs(ctx, logsRoot, client, &pod, "", container.Name, limits, false)
+					if err != nil {
+						errPath := filepath.Join("cluster-resources", "pods", "logs", pod.Namespace, pod.Name, fmt.Sprintf("%s-logs-errors.log", container.Name))
+						output.SaveResult(c.BundlePath, errPath, bytes.NewBuffer([]byte(err.Error())))
+					}
+					for k, v := range podLogs {
+						output[filepath.Join("cluster-resources", "pods", "logs", pod.Namespace, k)] = v
+					}
 				}
 			}
-		}
+		},
 	})
 
 	// these collect functions all have the exact same args and structure to run them
@@ -221,85 +228,116 @@ func (c *CollectClusterResources) Collect(progressChan chan<- interface{}) (Coll
 
 	// add the above collect functions to the queue
 	for _, thisQuery := range apiQueries {
-		clusterResourceCollectors = append(clusterResourceCollectors, func() {
-			queryOutput, errors := thisQuery.queryFunction(ctx, client, namespaceNames)
-			for k, v := range queryOutput {
-				output.SaveResult(c.BundlePath, path.Join("cluster-resources", thisQuery.saveLocation, k), bytes.NewBuffer(v))
-			}
-			output.SaveResult(c.BundlePath, "cluster-resources/"+thisQuery.saveLocation+".json", marshalErrors(errors))
+		clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+			Name: thisQuery.saveLocation,
+			Run: func() {
+				queryOutput, errors := thisQuery.queryFunction(ctx, client, namespaceNames)
+				for k, v := range queryOutput {
+					output.SaveResult(c.BundlePath, path.Join("cluster-resources", thisQuery.saveLocation, k), bytes.NewBuffer(v))
+				}
+				output.SaveResult(c.BundlePath, "cluster-resources/"+thisQuery.saveLocation+".json", marshalErrors(errors))
+			},
 		})
 	}
 
 	// storage classes
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		storageClasses, storageErrors := storageClasses(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/storage-classes.json", bytes.NewBuffer(storageClasses))
-		output.SaveResult(c.BundlePath, "cluster-resources/storage-errors.json", marshalErrors(storageErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "storage classes",
+		Run: func() {
+			storageClasses, storageErrors := storageClasses(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/storage-classes.json", bytes.NewBuffer(storageClasses))
+			output.SaveResult(c.BundlePath, "cluster-resources/storage-errors.json", marshalErrors(storageErrors))
+		},
 	})
 
 	// crds
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		customResourceDefinitions, crdErrors := crds(ctx, client, c.ClientConfig)
-		output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions.json", bytes.NewBuffer(customResourceDefinitions))
-		output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions-errors.json", marshalErrors(crdErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "crds",
+		Run: func() {
+			customResourceDefinitions, crdErrors := crds(ctx, client, c.ClientConfig)
+			output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions.json", bytes.NewBuffer(customResourceDefinitions))
+			output.SaveResult(c.BundlePath, "cluster-resources/custom-resource-definitions-errors.json", marshalErrors(crdErrors))
+		},
 	})
 
 	// crs
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		customResources, crErrors := crs(ctx, dynamicClient, client, c.ClientConfig, namespaceNames)
-		for k, v := range customResources {
-			output.SaveResult(c.BundlePath, fmt.Sprintf("cluster-resources/custom-resources/%v", k), bytes.NewBuffer(v))
-		}
-		output.SaveResult(c.BundlePath, "cluster-resources/custom-resources/custom-resources-errors.json", marshalErrors(crErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "crs",
+		Run: func() {
+			customResources, crErrors := crs(ctx, dynamicClient, client, c.ClientConfig, namespaceNames)
+			for k, v := range customResources {
+				output.SaveResult(c.BundlePath, fmt.Sprintf("cluster-resources/custom-resources/%v", k), bytes.NewBuffer(v))
+			}
+			output.SaveResult(c.BundlePath, "cluster-resources/custom-resources/custom-resources-errors.json", marshalErrors(crErrors))
+		},
 	})
 
 	// nodes
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		nodes, nodeErrors := nodes(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/nodes.json", bytes.NewBuffer(nodes))
-		output.SaveResult(c.BundlePath, "cluster-resources/nodes-errors.json", marshalErrors(nodeErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "nodes",
+		Run: func() {
+			nodes, nodeErrors := nodes(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/nodes.json", bytes.NewBuffer(nodes))
+			output.SaveResult(c.BundlePath, "cluster-resources/nodes-errors.json", marshalErrors(nodeErrors))
+		},
 	})
 
 	// apiResources
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		groups, resources, groupsResourcesErrors := apiResources(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/groups.json", bytes.NewBuffer(groups))
-		output.SaveResult(c.BundlePath, "cluster-resources/resources.json", bytes.NewBuffer(resources))
-		output.SaveResult(c.BundlePath, "cluster-resources/groups-resources-errors.json", marshalErrors(groupsResourcesErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "api resources",
+		Run: func() {
+			groups, resources, groupsResourcesErrors := apiResources(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/groups.json", bytes.NewBuffer(groups))
+			output.SaveResult(c.BundlePath, "cluster-resources/resources.json", bytes.NewBuffer(resources))
+			output.SaveResult(c.BundlePath, "cluster-resources/groups-resources-errors.json", marshalErrors(groupsResourcesErrors))
+		},
 	})
 
 	//Persistent Volumes
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		pvs, pvsErrors := pvs(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/pvs.json", bytes.NewBuffer(pvs))
-		output.SaveResult(c.BundlePath, "cluster-resources/pvs-errors.json", marshalErrors(pvsErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "persisten volumes",
+		Run: func() {
+			pvs, pvsErrors := pvs(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/pvs.json", bytes.NewBuffer(pvs))
+			output.SaveResult(c.BundlePath, "cluster-resources/pvs-errors.json", marshalErrors(pvsErrors))
+		},
 	})
 
 	//Cluster Roles
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		clusterRoles, clusterRolesErrors := clusterRoles(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/clusterroles.json", bytes.NewBuffer(clusterRoles))
-		output.SaveResult(c.BundlePath, "cluster-resources/clusterroles-errors.json", marshalErrors(clusterRolesErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "cluster roles",
+		Run: func() {
+			clusterRoles, clusterRolesErrors := clusterRoles(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/clusterroles.json", bytes.NewBuffer(clusterRoles))
+			output.SaveResult(c.BundlePath, "cluster-resources/clusterroles-errors.json", marshalErrors(clusterRolesErrors))
+		},
 	})
 
 	//Cluster Role Bindings
-	clusterResourceCollectors = append(clusterResourceCollectors, func() {
-		clusterRoleBindings, clusterRoleBindingsErrors := clusterRoleBindings(ctx, client)
-		output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings.json", bytes.NewBuffer(clusterRoleBindings))
-		output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings-errors.json", marshalErrors(clusterRoleBindingsErrors))
+	clusterResourceCollectors = append(clusterResourceCollectors, getClusterResource{
+		Name: "cluster role bindings",
+		Run: func() {
+			clusterRoleBindings, clusterRoleBindingsErrors := clusterRoleBindings(ctx, client)
+			output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings.json", bytes.NewBuffer(clusterRoleBindings))
+			output.SaveResult(c.BundlePath, "cluster-resources/clusterRoleBindings-errors.json", marshalErrors(clusterRoleBindingsErrors))
+		},
 	})
 
 	// run the collectors
 
-	maxNbConcurrentGoroutines := 5
+	maxNbConcurrentGoroutines := 1
 	concurrentGoroutines := make(chan struct{}, maxNbConcurrentGoroutines)
+	start := make(map[string]time.Time)
 
 	for _, thisClusterResourceCollector := range clusterResourceCollectors {
 		wg.Add(1)
 		go func(crCollector getClusterResource) {
 			defer wg.Done()
 			concurrentGoroutines <- struct{}{}
-			crCollector()
+			start[crCollector.Name] = time.Now()
+			crCollector.Run()
+			collectorName := strings.ReplaceAll(crCollector.Name, "-", " ")
+			fmt.Printf("\n%s Collector took %v\n", strings.Title(collectorName), time.Since(start[crCollector.Name]))
 			<-concurrentGoroutines
 		}(thisClusterResourceCollector)
 	}
