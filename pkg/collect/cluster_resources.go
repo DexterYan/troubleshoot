@@ -454,7 +454,7 @@ func pods(ctx context.Context, client *kubernetes.Clientset, namespaces []string
 	namespaceList := readNamespacelist(namespaces)
 	start := make(map[string]time.Time)
 
-	for i := 1; i <= 2; i++ {
+	for i := 1; i <= 3; i++ {
 		wg.Add(1)
 		go func() {
 			for namespace := range namespaceList {
